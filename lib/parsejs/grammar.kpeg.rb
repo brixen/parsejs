@@ -1,14 +1,370 @@
-require 'kpeg/compiled_parser'
+class ParseJS::Parser
+  # :stopdoc:
 
-class ParseJS::Parser < KPeg::CompiledParser
+    # This is distinct from setup_parser so that a standalone parser
+    # can redefine #initialize and still have access to the proper
+    # parser setup code.
+    def initialize(str, debug=false)
+      setup_parser(str, debug)
+    end
+
+
+
+    # Prepares for parsing +str+.  If you define a custom initialize you must
+    # call this method before #parse
+    def setup_parser(str, debug=false)
+      @string = str
+      @pos = 0
+      @memoizations = Hash.new { |h,k| h[k] = {} }
+      @result = nil
+      @failed_rule = nil
+      @failing_rule_offset = -1
+
+      setup_foreign_grammar
+    end
+
+    attr_reader :string
+    attr_reader :failing_rule_offset
+    attr_accessor :result, :pos
+
+    
+    def current_column(target=pos)
+      if c = string.rindex("\n", target-1)
+        return target - c - 1
+      end
+
+      target + 1
+    end
+
+    def current_line(target=pos)
+      cur_offset = 0
+      cur_line = 0
+
+      string.each_line do |line|
+        cur_line += 1
+        cur_offset += line.size
+        return cur_line if cur_offset >= target
+      end
+
+      -1
+    end
+
+    def lines
+      lines = []
+      string.each_line { |l| lines << l }
+      lines
+    end
+
+
+
+    def get_text(start)
+      @string[start..@pos-1]
+    end
+
+    def show_pos
+      width = 10
+      if @pos < width
+        "#{@pos} (\"#{@string[0,@pos]}\" @ \"#{@string[@pos,width]}\")"
+      else
+        "#{@pos} (\"... #{@string[@pos - width, width]}\" @ \"#{@string[@pos,width]}\")"
+      end
+    end
+
+    def failure_info
+      l = current_line @failing_rule_offset
+      c = current_column @failing_rule_offset
+
+      if @failed_rule.kind_of? Symbol
+        info = self.class::Rules[@failed_rule]
+        "line #{l}, column #{c}: failed rule '#{info.name}' = '#{info.rendered}'"
+      else
+        "line #{l}, column #{c}: failed rule '#{@failed_rule}'"
+      end
+    end
+
+    def failure_caret
+      l = current_line @failing_rule_offset
+      c = current_column @failing_rule_offset
+
+      line = lines[l-1]
+      "#{line}\n#{' ' * (c - 1)}^"
+    end
+
+    def failure_character
+      l = current_line @failing_rule_offset
+      c = current_column @failing_rule_offset
+      lines[l-1][c-1, 1]
+    end
+
+    def failure_oneline
+      l = current_line @failing_rule_offset
+      c = current_column @failing_rule_offset
+
+      char = lines[l-1][c-1, 1]
+
+      if @failed_rule.kind_of? Symbol
+        info = self.class::Rules[@failed_rule]
+        "@#{l}:#{c} failed rule '#{info.name}', got '#{char}'"
+      else
+        "@#{l}:#{c} failed rule '#{@failed_rule}', got '#{char}'"
+      end
+    end
+
+    class ParseError < RuntimeError
+    end
+
+    def raise_error
+      raise ParseError, failure_oneline
+    end
+
+    def show_error(io=STDOUT)
+      error_pos = @failing_rule_offset
+      line_no = current_line(error_pos)
+      col_no = current_column(error_pos)
+
+      io.puts "On line #{line_no}, column #{col_no}:"
+
+      if @failed_rule.kind_of? Symbol
+        info = self.class::Rules[@failed_rule]
+        io.puts "Failed to match '#{info.rendered}' (rule '#{info.name}')"
+      else
+        io.puts "Failed to match rule '#{@failed_rule}'"
+      end
+
+      io.puts "Got: #{string[error_pos,1].inspect}"
+      line = lines[line_no-1]
+      io.puts "=> #{line}"
+      io.print(" " * (col_no + 3))
+      io.puts "^"
+    end
+
+    def set_failed_rule(name)
+      if @pos > @failing_rule_offset
+        @failed_rule = name
+        @failing_rule_offset = @pos
+      end
+    end
+
+    attr_reader :failed_rule
+
+    def match_string(str)
+      len = str.size
+      if @string[pos,len] == str
+        @pos += len
+        return str
+      end
+
+      return nil
+    end
+
+    def scan(reg)
+      if m = reg.match(@string[@pos..-1])
+        width = m.end(0)
+        @pos += width
+        return true
+      end
+
+      return nil
+    end
+
+    if "".respond_to? :getbyte
+      def get_byte
+        if @pos >= @string.size
+          return nil
+        end
+
+        s = @string.getbyte @pos
+        @pos += 1
+        s
+      end
+    else
+      def get_byte
+        if @pos >= @string.size
+          return nil
+        end
+
+        s = @string[@pos]
+        @pos += 1
+        s
+      end
+    end
+
+    def parse(rule=nil)
+      # We invoke the rules indirectly via apply
+      # instead of by just calling them as methods because
+      # if the rules use left recursion, apply needs to
+      # manage that.
+
+      if !rule
+        result = apply(:_root)
+        if @pos != @string.size
+          show_error
+          raise_error
+        end
+        result
+      else
+        method = rule.gsub("-","_hyphen_")
+        apply :"_#{method}"
+      end
+    end
+
+    class MemoEntry
+      def initialize(ans, pos)
+        @ans = ans
+        @pos = pos
+        @result = nil
+        @set = false
+        @left_rec = false
+      end
+
+      attr_reader :ans, :pos, :result, :set
+      attr_accessor :left_rec
+
+      def move!(ans, pos, result)
+        @ans = ans
+        @pos = pos
+        @result = result
+        @set = true
+        @left_rec = false
+      end
+    end
+
+    def external_invoke(other, rule, *args)
+      old_pos = @pos
+      old_string = @string
+
+      @pos = other.pos
+      @string = other.string
+
+      begin
+        if val = __send__(rule, *args)
+          other.pos = @pos
+          other.result = @result
+        else
+          other.set_failed_rule "#{self.class}##{rule}"
+        end
+        val
+      ensure
+        @pos = old_pos
+        @string = old_string
+      end
+    end
+
+    def apply_with_args(rule, *args)
+      memo_key = [rule, args]
+      if m = @memoizations[memo_key][@pos]
+        @pos = m.pos
+        if !m.set
+          m.left_rec = true
+          return nil
+        end
+
+        @result = m.result
+
+        return m.ans
+      else
+        m = MemoEntry.new(nil, @pos)
+        @memoizations[memo_key][@pos] = m
+        start_pos = @pos
+
+        ans = __send__ rule, *args
+
+        lr = m.left_rec
+
+        m.move! ans, @pos, @result
+
+        # Don't bother trying to grow the left recursion
+        # if it's failing straight away (thus there is no seed)
+        if ans and lr
+          return grow_lr(rule, args, start_pos, m)
+        else
+          return ans
+        end
+
+        return ans
+      end
+    end
+
+    def apply(rule)
+      if m = @memoizations[rule][@pos]
+        @pos = m.pos
+        if !m.set
+          m.left_rec = true
+          return nil
+        end
+
+        @result = m.result
+
+        return m.ans
+      else
+        m = MemoEntry.new(nil, @pos)
+        @memoizations[rule][@pos] = m
+        start_pos = @pos
+
+        ans = __send__ rule
+
+        lr = m.left_rec
+
+        m.move! ans, @pos, @result
+
+        # Don't bother trying to grow the left recursion
+        # if it's failing straight away (thus there is no seed)
+        if ans and lr
+          return grow_lr(rule, nil, start_pos, m)
+        else
+          return ans
+        end
+
+        return ans
+      end
+    end
+
+    def grow_lr(rule, args, start_pos, m)
+      while true
+        @pos = start_pos
+        @result = m.result
+
+        if args
+          ans = __send__ rule, *args
+        else
+          ans = __send__ rule
+        end
+        return nil unless ans
+
+        break if @pos <= m.pos
+
+        m.move! ans, @pos, @result
+      end
+
+      @result = m.result
+      @pos = m.pos
+      return m.ans
+    end
+
+    class RuleInfo
+      def initialize(name, rendered)
+        @name = name
+        @rendered = rendered
+      end
+
+      attr_reader :name, :rendered
+    end
+
+    def self.rule_info(name, rendered)
+      RuleInfo.new(name, rendered)
+    end
+
+
+  # :startdoc:
 
 
   def initialize(string)
-    super
+    setup_parser string
     @benchmark = true
   end
 
 
+  # :stopdoc:
 
   module ::ParseJS::AST
     class Node; end
@@ -173,10 +529,10 @@ class ParseJS::Parser < KPeg::CompiledParser
       attr_reader :body
     end
     class Identifier < Node
-      def initialize(val)
-        @val = val
+      def initialize(value)
+        @value = value
       end
-      attr_reader :val
+      attr_reader :value
     end
     class IfStatement < Node
       def initialize(test, consequent, alternate)
@@ -197,10 +553,10 @@ class ParseJS::Parser < KPeg::CompiledParser
       attr_reader :body
     end
     class Literal < Node
-      def initialize(val)
-        @val = val
+      def initialize(value)
+        @value = value
       end
-      attr_reader :val
+      attr_reader :value
     end
     class LogicalExpression < Node
       def initialize(op, left, right)
@@ -231,10 +587,10 @@ class ParseJS::Parser < KPeg::CompiledParser
       attr_reader :args
     end
     class Number < Node
-      def initialize(val)
-        @val = val
+      def initialize(value)
+        @value = value
       end
-      attr_reader :val
+      attr_reader :value
     end
     class ObjectExpression < Node
       def initialize(properties)
@@ -299,11 +655,11 @@ class ParseJS::Parser < KPeg::CompiledParser
       attr_reader :name
     end
     class String < Node
-      def initialize(val, quote)
-        @val = val
+      def initialize(value, quote)
+        @value = value
         @quote = quote
       end
-      attr_reader :val
+      attr_reader :value
       attr_reader :quote
     end
     class SwitchCase < Node
@@ -395,153 +751,157 @@ class ParseJS::Parser < KPeg::CompiledParser
       attr_reader :body
     end
   end
-  def array_expression(elements)
-    ::ParseJS::AST::ArrayExpression.new(elements)
+  module ::ParseJS::ASTConstruction
+    def array_expression(elements)
+      ::ParseJS::AST::ArrayExpression.new(elements)
+    end
+    def array_pattern(elements)
+      ::ParseJS::AST::ArrayPattern.new(elements)
+    end
+    def assignment_expression(op, left, right)
+      ::ParseJS::AST::AssignmentExpression.new(op, left, right)
+    end
+    def binary_expression(op, left, right)
+      ::ParseJS::AST::BinaryExpression.new(op, left, right)
+    end
+    def block_statement(statements)
+      ::ParseJS::AST::BlockStatement.new(statements)
+    end
+    def break_statement(label)
+      ::ParseJS::AST::BreakStatement.new(label)
+    end
+    def call_expression(callee, args)
+      ::ParseJS::AST::CallExpression.new(callee, args)
+    end
+    def catch_clause(param, body)
+      ::ParseJS::AST::CatchClause.new(param, body)
+    end
+    def comment(body, type, newline)
+      ::ParseJS::AST::Comment.new(body, type, newline)
+    end
+    def commented_statement(statement, comments)
+      ::ParseJS::AST::CommentedStatement.new(statement, comments)
+    end
+    def conditional_expression(test, consequent, alternate)
+      ::ParseJS::AST::ConditionalExpression.new(test, consequent, alternate)
+    end
+    def continue_statement(label)
+      ::ParseJS::AST::ContinueStatement.new(label)
+    end
+    def debugger_statement()
+      ::ParseJS::AST::DebuggerStatement.new()
+    end
+    def do_while_statement(body, test)
+      ::ParseJS::AST::DoWhileStatement.new(body, test)
+    end
+    def empty_statement()
+      ::ParseJS::AST::EmptyStatement.new()
+    end
+    def expression_statement(expression)
+      ::ParseJS::AST::ExpressionStatement.new(expression)
+    end
+    def for_in_statement(left, right, body, type)
+      ::ParseJS::AST::ForInStatement.new(left, right, body, type)
+    end
+    def for_statement(init, test, update, body)
+      ::ParseJS::AST::ForStatement.new(init, test, update, body)
+    end
+    def function_declaration(id, params, body)
+      ::ParseJS::AST::FunctionDeclaration.new(id, params, body)
+    end
+    def function_expression(id, params, body)
+      ::ParseJS::AST::FunctionExpression.new(id, params, body)
+    end
+    def identifier(value)
+      ::ParseJS::AST::Identifier.new(value)
+    end
+    def if_statement(test, consequent, alternate)
+      ::ParseJS::AST::IfStatement.new(test, consequent, alternate)
+    end
+    def labeled_statement(label, body)
+      ::ParseJS::AST::LabeledStatement.new(label, body)
+    end
+    def literal(value)
+      ::ParseJS::AST::Literal.new(value)
+    end
+    def logical_expression(op, left, right)
+      ::ParseJS::AST::LogicalExpression.new(op, left, right)
+    end
+    def member_expression(object, property, computed)
+      ::ParseJS::AST::MemberExpression.new(object, property, computed)
+    end
+    def new_expression(callee, args)
+      ::ParseJS::AST::NewExpression.new(callee, args)
+    end
+    def number(value)
+      ::ParseJS::AST::Number.new(value)
+    end
+    def object_expression(properties)
+      ::ParseJS::AST::ObjectExpression.new(properties)
+    end
+    def object_pattern(properties)
+      ::ParseJS::AST::ObjectPattern.new(properties)
+    end
+    def parameter_list(list)
+      ::ParseJS::AST::ParameterList.new(list)
+    end
+    def program(elements)
+      ::ParseJS::AST::Program.new(elements)
+    end
+    def property(key, value, kind, comments)
+      ::ParseJS::AST::Property.new(key, value, kind, comments)
+    end
+    def regexp(body, flags)
+      ::ParseJS::AST::RegExp.new(body, flags)
+    end
+    def return_statement(label)
+      ::ParseJS::AST::ReturnStatement.new(label)
+    end
+    def sequence_expression(expressions)
+      ::ParseJS::AST::SequenceExpression.new(expressions)
+    end
+    def spread(name)
+      ::ParseJS::AST::Spread.new(name)
+    end
+    def string_literal(value, quote)
+      ::ParseJS::AST::String.new(value, quote)
+    end
+    def switch_case(test, consequent)
+      ::ParseJS::AST::SwitchCase.new(test, consequent)
+    end
+    def switch_statement(discriminant, cases)
+      ::ParseJS::AST::SwitchStatement.new(discriminant, cases)
+    end
+    def this_expression()
+      ::ParseJS::AST::ThisExpression.new()
+    end
+    def throw_statement(argument)
+      ::ParseJS::AST::ThrowStatement.new(argument)
+    end
+    def try_statement(block, handler, finalizer)
+      ::ParseJS::AST::TryStatement.new(block, handler, finalizer)
+    end
+    def unary_expression(op, argument)
+      ::ParseJS::AST::UnaryExpression.new(op, argument)
+    end
+    def update_expression(op, argument, prefix)
+      ::ParseJS::AST::UpdateExpression.new(op, argument, prefix)
+    end
+    def variable_declaration(kind, declarations, semicolon)
+      ::ParseJS::AST::VariableDeclaration.new(kind, declarations, semicolon)
+    end
+    def variable_declarator(id, init)
+      ::ParseJS::AST::VariableDeclarator.new(id, init)
+    end
+    def while_statement(test, body)
+      ::ParseJS::AST::WhileStatement.new(test, body)
+    end
+    def with_statement(object, body)
+      ::ParseJS::AST::WithStatement.new(object, body)
+    end
   end
-  def array_pattern(elements)
-    ::ParseJS::AST::ArrayPattern.new(elements)
-  end
-  def assignment_expression(op, left, right)
-    ::ParseJS::AST::AssignmentExpression.new(op, left, right)
-  end
-  def binary_expression(op, left, right)
-    ::ParseJS::AST::BinaryExpression.new(op, left, right)
-  end
-  def block_statement(statements)
-    ::ParseJS::AST::BlockStatement.new(statements)
-  end
-  def break_statement(label)
-    ::ParseJS::AST::BreakStatement.new(label)
-  end
-  def call_expression(callee, args)
-    ::ParseJS::AST::CallExpression.new(callee, args)
-  end
-  def catch_clause(param, body)
-    ::ParseJS::AST::CatchClause.new(param, body)
-  end
-  def comment(body, type, newline)
-    ::ParseJS::AST::Comment.new(body, type, newline)
-  end
-  def commented_statement(statement, comments)
-    ::ParseJS::AST::CommentedStatement.new(statement, comments)
-  end
-  def conditional_expression(test, consequent, alternate)
-    ::ParseJS::AST::ConditionalExpression.new(test, consequent, alternate)
-  end
-  def continue_statement(label)
-    ::ParseJS::AST::ContinueStatement.new(label)
-  end
-  def debugger_statement()
-    ::ParseJS::AST::DebuggerStatement.new()
-  end
-  def do_while_statement(body, test)
-    ::ParseJS::AST::DoWhileStatement.new(body, test)
-  end
-  def empty_statement()
-    ::ParseJS::AST::EmptyStatement.new()
-  end
-  def expression_statement(expression)
-    ::ParseJS::AST::ExpressionStatement.new(expression)
-  end
-  def for_in_statement(left, right, body, type)
-    ::ParseJS::AST::ForInStatement.new(left, right, body, type)
-  end
-  def for_statement(init, test, update, body)
-    ::ParseJS::AST::ForStatement.new(init, test, update, body)
-  end
-  def function_declaration(id, params, body)
-    ::ParseJS::AST::FunctionDeclaration.new(id, params, body)
-  end
-  def function_expression(id, params, body)
-    ::ParseJS::AST::FunctionExpression.new(id, params, body)
-  end
-  def identifier(val)
-    ::ParseJS::AST::Identifier.new(val)
-  end
-  def if_statement(test, consequent, alternate)
-    ::ParseJS::AST::IfStatement.new(test, consequent, alternate)
-  end
-  def labeled_statement(label, body)
-    ::ParseJS::AST::LabeledStatement.new(label, body)
-  end
-  def literal(val)
-    ::ParseJS::AST::Literal.new(val)
-  end
-  def logical_expression(op, left, right)
-    ::ParseJS::AST::LogicalExpression.new(op, left, right)
-  end
-  def member_expression(object, property, computed)
-    ::ParseJS::AST::MemberExpression.new(object, property, computed)
-  end
-  def new_expression(callee, args)
-    ::ParseJS::AST::NewExpression.new(callee, args)
-  end
-  def number(val)
-    ::ParseJS::AST::Number.new(val)
-  end
-  def object_expression(properties)
-    ::ParseJS::AST::ObjectExpression.new(properties)
-  end
-  def object_pattern(properties)
-    ::ParseJS::AST::ObjectPattern.new(properties)
-  end
-  def parameter_list(list)
-    ::ParseJS::AST::ParameterList.new(list)
-  end
-  def program(elements)
-    ::ParseJS::AST::Program.new(elements)
-  end
-  def property(key, value, kind, comments)
-    ::ParseJS::AST::Property.new(key, value, kind, comments)
-  end
-  def regexp(body, flags)
-    ::ParseJS::AST::RegExp.new(body, flags)
-  end
-  def return_statement(label)
-    ::ParseJS::AST::ReturnStatement.new(label)
-  end
-  def sequence_expression(expressions)
-    ::ParseJS::AST::SequenceExpression.new(expressions)
-  end
-  def spread(name)
-    ::ParseJS::AST::Spread.new(name)
-  end
-  def string_literal(val, quote)
-    ::ParseJS::AST::String.new(val, quote)
-  end
-  def switch_case(test, consequent)
-    ::ParseJS::AST::SwitchCase.new(test, consequent)
-  end
-  def switch_statement(discriminant, cases)
-    ::ParseJS::AST::SwitchStatement.new(discriminant, cases)
-  end
-  def this_expression()
-    ::ParseJS::AST::ThisExpression.new()
-  end
-  def throw_statement(argument)
-    ::ParseJS::AST::ThrowStatement.new(argument)
-  end
-  def try_statement(block, handler, finalizer)
-    ::ParseJS::AST::TryStatement.new(block, handler, finalizer)
-  end
-  def unary_expression(op, argument)
-    ::ParseJS::AST::UnaryExpression.new(op, argument)
-  end
-  def update_expression(op, argument, prefix)
-    ::ParseJS::AST::UpdateExpression.new(op, argument, prefix)
-  end
-  def variable_declaration(kind, declarations, semicolon)
-    ::ParseJS::AST::VariableDeclaration.new(kind, declarations, semicolon)
-  end
-  def variable_declarator(id, init)
-    ::ParseJS::AST::VariableDeclarator.new(id, init)
-  end
-  def while_statement(test, body)
-    ::ParseJS::AST::WhileStatement.new(test, body)
-  end
-  def with_statement(object, body)
-    ::ParseJS::AST::WithStatement.new(object, body)
-  end
+  include ::ParseJS::ASTConstruction
+  def setup_foreign_grammar; end
 
   # S = (WhiteSpace | LineTerminatorSequence { nil } | Comment)
   def _S
@@ -9457,4 +9817,5 @@ class ParseJS::Parser < KPeg::CompiledParser
   Rules[:_RegularExpressionClass] = rule_info("RegularExpressionClass", "\"[\" RegularExpressionClassChar* \"]\"")
   Rules[:_RegularExpressionClassChar] = rule_info("RegularExpressionClassChar", "(!(LineTerminator | \"\\\\\" | \"]\") SourceCharacter | RegularExpressionBackslashSequence)")
   Rules[:_RegularExpressionFlags] = rule_info("RegularExpressionFlags", "< IdentifierPart* > { text }")
+  # :startdoc:
 end
