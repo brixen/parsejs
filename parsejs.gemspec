@@ -3,7 +3,7 @@ $:.unshift File.expand_path("../lib", __FILE__)
 require "parsejs/version"
 
 Gem::Specification.new do |gem|
-  gem.authors       = ["Yehuda Katz"]
+  gem.authors       = ["Yehuda Katz", "Brian Ford"]
   gem.email         = ["wycats@gmail.com"]
   gem.description   = %q{ParseJS is a JavaScript parser written using KPeg}
   gem.summary       = %q{ParseJS parses JavaScript into a Ruby AST, suitable for preprocessing and other purposes. It also has work-in-progress support for extracting documentation from JavaScript}
@@ -16,8 +16,8 @@ Gem::Specification.new do |gem|
   gem.require_paths = ["lib"]
   gem.version       = ParseJS::VERSION
 
-  gem.add_dependency "kpeg"
   gem.add_dependency "yard"
+  gem.add_development_dependency "kpeg", "~> 0.10"
   gem.add_development_dependency "rspec"
   gem.add_development_dependency "uglifier"
   gem.add_development_dependency "json"
