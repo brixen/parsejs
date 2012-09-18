@@ -5,10 +5,10 @@
 %% expression_statement = ast ExpressionStatement(expression)
 %% block_statement = ast BlockStatement(statements)
 %% empty_statement = ast EmptyStatement()
-%% identifier = ast Identifier(val)
-%% literal = ast Literal(val)
-%% number = ast Number(val)
-%% string_literal = ast String(val, quote)
+%% identifier = ast Identifier(value)
+%% literal = ast Literal(value)
+%% number = ast Number(value)
+%% string_literal = ast String(value, quote)
 %% regexp = ast RegExp(body, flags)
 %% this_expression = ast ThisExpression()
 %% variable_declaration = ast VariableDeclaration(kind, declarations, semicolon)
@@ -53,7 +53,7 @@
 
 %%{
   def initialize(string)
-    super
+    setup_parser string
     @benchmark = true
   end
 }

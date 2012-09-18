@@ -123,13 +123,13 @@ module ParseJS
     end
 
     def visit_Literal(literal)
-      case val = literal.val
+      case value = literal.value
       when nil
         "null"
       when ParseJS::AST::Node
-        accept val
+        accept value
       else
-        val.inspect
+        value.inspect
       end
     end
 

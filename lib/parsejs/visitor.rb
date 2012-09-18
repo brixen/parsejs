@@ -26,22 +26,22 @@ module ParseJS
     end
 
     def visit_Literal(literal)
-      case val = literal.val
+      case value = literal.value
       when nil
         "null"
       when ParseJS::AST::Node
-        accept val
+        accept value
       else
-        val
+        value
       end
     end
 
     def visit_Number(number)
-      number.val
+      number.value
     end
 
     def visit_String(string)
-      string.val
+      string.value
     end
 
     def visit_ThisExpression(statement)
@@ -61,7 +61,7 @@ module ParseJS
     end
 
     def visit_Identifier(id)
-      id.val
+      id.value
     end
 
     def visit_ThrowStatement(statement)

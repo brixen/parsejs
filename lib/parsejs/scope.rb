@@ -90,7 +90,7 @@ module ParseJS
       end
 
       def possible_variable_access(var)
-        push_variable_access var.val if var && var.type?("Identifier")
+        push_variable_access var.value if var && var.type?("Identifier")
       end
 
       def possible_variable_access_array(arr)
@@ -98,7 +98,7 @@ module ParseJS
       end
 
       def visit_VariableDeclarator(decl)
-        push_scope_variable decl.id.val
+        push_scope_variable decl.id.value
         possible_variable_access decl.init
 
         super
@@ -132,7 +132,7 @@ module ParseJS
 
       def visit_AssignmentExpression(expr)
         if expr.left.type?("Identifier")
-          push_parent_variable expr.left.val
+          push_parent_variable expr.left.value
         end
 
         possible_variable_access expr.right

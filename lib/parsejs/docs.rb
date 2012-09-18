@@ -77,14 +77,14 @@ module ParseJS
     end
 
     def visit_FunctionDeclaration(decl)
-      with_variables(decl, decl.params.list.map(&:val)) { super }
+      with_variables(decl, decl.params.list.map(&:value)) { super }
     end
 
     def visit_FunctionExpression(expr)
-      with_variables(expr, expr.params.list.map(&:val)) { super }
+      with_variables(expr, expr.params.list.map(&:value)) { super }
     end
 
-    def with_variables(expr, params=expr.params.map(&:val))
+    def with_variables(expr, params=expr.params.map(&:value))
       locals = FindVars.find_variables(expr)
       @current_variables.push(locals | params)
       yield
@@ -103,7 +103,7 @@ module ParseJS
 
       while object
         if object.is_a?(Identifier)
-          return object.val
+          return object.value
         elsif object.is_a?(ThisExpression)
           return "this"
         elsif object.respond_to?(:object)
@@ -121,7 +121,7 @@ module ParseJS
       if right.is_a?(CallExpression)
         callee = expr.right.callee
         if callee.is_a?(MemberExpression) && !callee.computed
-          property = callee.property.val
+          property = callee.property.value
           if property == "extend"
             if expr.left.is_a?(MemberExpression)
               left_id = member_left(expr.left)
@@ -182,7 +182,7 @@ module ParseJS
 
       case property.value
       when FunctionDeclaration, FunctionExpression
-        obj = YARD::CodeObjects::MethodObject.new(current_yard_class, property.key.val)
+        obj = YARD::CodeObjects::MethodObject.new(current_yard_class, property.key.value)
         obj.docstring = stripped_comment
       else
         # found a non-method property
@@ -225,7 +225,7 @@ module ParseJS
     end
 
     def visit_VariableDeclarator(expr)
-      @variables << expr.id.val
+      @variables << expr.id.value
     end
 
     def visit_FunctionDeclaration(*)
